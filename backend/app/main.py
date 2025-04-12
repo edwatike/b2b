@@ -1,18 +1,21 @@
 from fastapi import FastAPI
-from app.routers import search
 from fastapi.middleware.cors import CORSMiddleware
+from app.api import search
 
-app = FastAPI(title="B2B Supplier Search API")
+app = FastAPI()
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(search.router, prefix="/api", tags=["search"])
+# Подключение маршрутов
+app.include_router(search.router, prefix="/api")
 
 @app.get("/")
-def read_root():
-    return {"message": "Welcome to B2B API"}
+def root():
+    return {"message": "B2B backend запущен 👋"}
