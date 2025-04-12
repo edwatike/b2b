@@ -1,0 +1,8 @@
+# requirements.txt
+fastapi
+uvicorn[standard]
+sqlalchemy
+asyncpg
+python-dotenv
+httpx
+
