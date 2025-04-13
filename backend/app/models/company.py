@@ -6,4 +6,4 @@ class Company(SQLModel, table=True):
     city: str
     inn: str
     email: str
-    site: str
+    site: str 

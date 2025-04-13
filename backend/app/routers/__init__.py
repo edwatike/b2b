@@ -1,7 +1,8 @@
-from .companies import router as companies_router
-from .search import router as search_router
 from fastapi import APIRouter
+from . import companies, search, products  # добавляем products
 
 router = APIRouter()
-router.include_router(companies_router)
-router.include_router(search_router)
+router.include_router(companies.router, prefix="/companies", tags=["companies"])
+router.include_router(search.router, prefix="/search", tags=["search"])
+router.include_router(products.router, prefix="/products", tags=["products"])
+

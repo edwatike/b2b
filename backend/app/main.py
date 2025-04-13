@@ -1,11 +1,16 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import router
-from app.db import init_db  # 👈 добавь это
+from app.routers import router  # ✅ общий router, см. init
+from app.db import init_db
 
-app = FastAPI()
+app = FastAPI(
+    title="B2B Backend",
+    docs_url="/docs",            # ✅ Swagger по умолчанию
+    redoc_url="/redoc",          # ✅ можно отключить, если не нужно
+    openapi_url="/openapi.json"  # ✅ JSON описание API
+)
 
-# CORS
+# CORS — по-простому пока:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,11 +19,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Подключаем маршруты
 app.include_router(router, prefix="/api")
 
 @app.on_event("startup")
-async def on_startup():
-    await init_db()  # 👈 Вызов инициализации базы при старте
+async def startup_event():
+    await init_db()
 
 @app.get("/")
 def root():
