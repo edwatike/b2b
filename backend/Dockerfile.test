@@ -1,0 +1,7 @@
+FROM python:3.12
+
+# Тестируем DNS и установку пакетов
+RUN apt-get update && \
+    apt-get install -y curl && \
+    curl -v deb.debian.org && \
+    apt-get install -y build-essential python3-dev 

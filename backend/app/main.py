@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import search
+from app.routers import router
+from app.db import init_db  # 👈 добавь это
 
 app = FastAPI()
 
@@ -13,9 +14,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Подключение маршрутов
-app.include_router(search.router, prefix="/api")
+app.include_router(router, prefix="/api")
+
+@app.on_event("startup")
+async def on_startup():
+    await init_db()  # 👈 Вызов инициализации базы при старте
 
 @app.get("/")
 def root():
     return {"message": "B2B backend запущен 👋"}
+
