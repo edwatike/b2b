@@ -9,12 +9,16 @@ class SearchResult(SQLModel, table=True):
     
     Индексы:
     - query: для быстрого поиска по запросу
+    - result_url: для проверки дубликатов
+    - title: для поиска по заголовкам
     - created_at: для TTL и сортировки
-    - (query, result_url): для уникальности результатов
+    - (query, result_url): составной индекс для уникальности
     """
     __tablename__ = "search_results"
     __table_args__ = (
         Index("ix_search_results_query", "query"),
+        Index("ix_search_results_url", "result_url"),
+        Index("ix_search_results_title", "title"),
         Index("ix_search_results_created_at", "created_at"),
         Index("ix_search_results_query_url", "query", "result_url", unique=True),
     )

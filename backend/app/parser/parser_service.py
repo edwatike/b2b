@@ -8,6 +8,8 @@ from app.models.search_result import SearchResult
 from app.db import async_session
 from .search_scraperapi import search_scraperapi
 from sqlalchemy.exc import SQLAlchemyError
+from tenacity import retry, stop_after_attempt, wait_exponential
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,11 @@ async def test_scraperapi():
     else:
         logger.error("Не удалось получить HTML")
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=1, max=10),
+    reraise=True
+)
 async def search_and_save(keyword: str, max_results: int = 1000) -> List[Dict[str, Any]]:
     """
     Выполняет поиск через ScraperAPI и сохраняет результаты в базу данных
@@ -94,8 +101,12 @@ async def search_and_save(keyword: str, max_results: int = 1000) -> List[Dict[st
         logger.info(f"Найдено результатов: {len(results)}")
         
         async with async_session() as session:
-            # Создаем список объектов для bulk insert
-            db_items = [
+            # Получаем существующие URL из базы для этого запроса
+            stmt = select(SearchResult.result_url).where(SearchResult.query == keyword)
+            existing_urls = {r[0] for r in (await session.execute(stmt)).all()}
+            
+            # Фильтруем дубликаты
+            new_results = [
                 SearchResult(
                     query=keyword,
                     result_url=item['link'],
@@ -103,26 +114,35 @@ async def search_and_save(keyword: str, max_results: int = 1000) -> List[Dict[st
                     snippet=item.get('snippet')
                 )
                 for item in results
+                if item['link'] not in existing_urls
             ]
             
-            try:
-                # Добавляем все объекты одним запросом
-                session.add_all(db_items)
-                await session.commit()
-                logger.info(f"Сохранено {len(db_items)} результатов в базу данных")
-            except SQLAlchemyError as e:
-                await session.rollback()
-                logger.error(f"Ошибка при сохранении в базу данных: {str(e)}")
-                raise
+            if new_results:
+                try:
+                    # Добавляем все объекты одним запросом
+                    session.add_all(new_results)
+                    await session.commit()
+                    logger.info(f"Сохранено {len(new_results)} новых результатов в базу данных")
+                except SQLAlchemyError as e:
+                    await session.rollback()
+                    logger.error(f"Ошибка при сохранении в базу данных: {str(e)}")
+                    raise
+            else:
+                logger.info("Новых результатов не найдено")
                 
         return results
     except Exception as e:
         logger.error(f"Ошибка при выполнении поиска: {str(e)}")
         raise
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=1, max=10),
+    reraise=True
+)
 async def scrape_url(url: str) -> str:
     """
-    Парсит указанный URL через ScraperAPI с обработкой ошибок и повторными попытками
+    Парсит указанный URL через ScraperAPI с механизмом retry
     
     Args:
         url: URL для парсинга
@@ -130,21 +150,13 @@ async def scrape_url(url: str) -> str:
     Returns:
         str: HTML-код страницы
     """
-    max_retries = 3
-    retry_delay = 1  # секунда
-    
-    for attempt in range(max_retries):
-        try:
-            html = await scrape_url_with_scraperapi(url)
-            if html:
-                return html
-        except Exception as e:
-            logger.warning(f"Попытка {attempt + 1}/{max_retries} не удалась: {str(e)}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay * (attempt + 1))
-            
-    logger.error(f"Не удалось получить HTML после {max_retries} попыток")
-    return ""
+    logger.info(f"Начинаем парсинг URL: {url}")
+    html = await scrape_url_with_scraperapi(url)
+    if not html:
+        logger.error(f"Не удалось получить HTML для {url}")
+        return ""
+    logger.info(f"Успешно получен HTML для {url}")
+    return html
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
