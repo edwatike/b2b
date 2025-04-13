@@ -1,0 +1,14 @@
+serpapi:
+  api_key: "your_serpapi_key_here"
+  search_engine: "google"
+  num_results: 10
+  lang: "ru"
+
+google:
+  base_url: "https://www.google.com"
+  search_path: "/search"
+  headers:
+    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    Accept-Language: "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+    Accept-Encoding: "gzip, deflate, br" 

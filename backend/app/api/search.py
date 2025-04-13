@@ -1,25 +1,9 @@
-from fastapi import APIRouter, Query
-from typing import List
+from fastapi import APIRouter
+from app.parser.main import parse_all_sources
 
 router = APIRouter()
 
-# Временно фейковые данные
 @router.get("/search")
-async def search_suppliers(query: str = Query(..., min_length=2)):
-    suppliers = [
-        {
-            "name": "ООО ТрубаМеталл",
-            "city": "Москва",
-            "inn": "7712345678",
-            "email": "info@trubametal.ru",
-            "site": "https://trubametal.ru"
-        },
-        {
-            "name": "ИП Стальные Решения",
-            "city": "Санкт-Петербург",
-            "inn": "7801234567",
-            "email": "sales@stalres.ru",
-            "site": "https://stalres.ru"
-        }
-    ]
-    return {"query": query, "results": suppliers}
+async def search(query: str):
+    results = await parse_all_sources(query)
+    return {"query": query, "results": [r.dict() for r in results]}

@@ -1,35 +1,35 @@
-version: '3.9'
+version: '3.8'
 
 services:
   db:
     image: postgres:15
-    restart: always
+    container_name: b2b_db_1
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: b2b
+      POSTGRES_USER: b2b_user
+      POSTGRES_PASSWORD: b2b_pass
+      POSTGRES_DB: b2b_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5435:5432"
     networks:
       - b2b_network
+    ports:
+      - "5432:5432"
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    build: ./backend
     container_name: b2b-backend
-    command: gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+    command: bash -c "/wait-for-db.sh db && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     volumes:
       - ./backend:/app
     ports:
       - "8001:8000"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - SCRAPER_API_KEY=${SCRAPER_API_KEY}
     depends_on:
       - db
-    environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/b2b
-      PYTHONUNBUFFERED: 1
     networks:
       - b2b_network
 
