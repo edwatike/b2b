@@ -1,26 +1,35 @@
-from fastapi import APIRouter, Depends, BackgroundTasks
-from typing import Optional
+from fastapi import APIRouter, HTTPException
+from typing import List, Dict
 import logging
-from ..parser.models import SearchRequest, SearchResponse
+from ..parser.models import SearchRequest, SearchResponse, SearchResult
 from ..parser.parser_service import ParserService
-from ..parser.search_google import GoogleSearch
 from ..parser.playwright_runner import PlaywrightRunner
 from ..parser.config.parser_config import config
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/parser", tags=["parser"])
 
 # Global instances
 playwright_runner = None
-google_search = None
+parser_service = ParserService()
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 10
+
+class SearchResponse(BaseModel):
+    results: List[SearchResult]
+    total: int
+    cached: int
+    new: int
 
 @router.on_event("startup")
 async def startup_event():
     """Initialize parser service on startup."""
-    global playwright_runner, google_search
+    global playwright_runner
     playwright_runner = PlaywrightRunner(config)
     await playwright_runner.initialize()
-    google_search = GoogleSearch(playwright_runner)
     logger.info("✅ Parser service initialized")
 
 @router.on_event("shutdown")
@@ -32,37 +41,32 @@ async def shutdown_event():
     logger.info("✅ Parser service cleaned up")
 
 @router.post("/search")
-async def search(
-    request: SearchRequest,
-    background_tasks: BackgroundTasks
-) -> SearchResponse:
+async def search(request: SearchRequest) -> Dict:
     """
-    Search for companies based on query, region, and category.
-    Returns both cached and new results.
+    Выполняет поиск по заданному запросу.
+    
+    Args:
+        request: Параметры поискового запроса
+        
+    Returns:
+        Dict: Результаты поиска
     """
     try:
         logger.info(f"Получен запрос на поиск: {request.query}")
+        logger.info(f"Максимальное количество результатов: {request.limit}")
         
-        # Выполняем поиск через Google
-        results = await google_search.search(
-            query=request.query,
-            region=request.region,
-            limit=request.limit
-        )
+        results = await parser_service.search_and_save(request.query, request.limit)
+        logger.info(f"Поиск завершен, найдено результатов: {len(results) if results else 0}")
         
-        # Формируем ответ
-        response = SearchResponse(
-            results=results,
-            total=len(results),
-            cached=0,
-            new=len(results)
-        )
-        
-        logger.info(f"Найдено результатов: {response.total}")
+        response = {
+            "results": results,
+            "total": len(results) if results else 0,
+            "cached": 0,  # TODO: Добавить подсчет кэшированных результатов
+            "new": len(results) if results else 0
+        }
+        logger.info(f"Отправляем ответ: {response}")
         return response
         
     except Exception as e:
-        logger.error(f"Error processing search request: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return SearchResponse(results=[], total=0, cached=0, new=0) 
+        logger.error(f"Ошибка при выполнении поиска: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка при выполнении поиска: {str(e)}") 

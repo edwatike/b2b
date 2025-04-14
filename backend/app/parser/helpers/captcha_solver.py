@@ -309,3 +309,38 @@ class CaptchaSolver:
             return success
         
         return True  # Капчи нет, все хорошо 
+
+async def check_captcha(page: Page) -> bool:
+    """
+    Проверяет наличие капчи на странице.
+    
+    Args:
+        page: Страница Playwright
+        
+    Returns:
+        bool: True если обнаружена капча, иначе False
+    """
+    try:
+        # Проверяем различные признаки капчи
+        captcha_selectors = [
+            "div.CheckboxCaptcha",
+            "div.Captcha",
+            "div.AdvancedCaptcha",
+            "div.AdvancedCaptcha-View",
+            "div.Captcha-View",
+            "div.CheckboxCaptcha-View",
+            "form[name='captcha']",
+            "div[class*='captcha']",
+            "div[class*='Captcha']"
+        ]
+        
+        for selector in captcha_selectors:
+            if await page.query_selector(selector):
+                logger.warning("Обнаружена капча на странице")
+                return True
+                
+        return False
+        
+    except Exception as e:
+        logger.error(f"Ошибка при проверке капчи: {str(e)}")
+        return False 

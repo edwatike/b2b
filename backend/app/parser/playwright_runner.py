@@ -1,4 +1,4 @@
-from playwright.async_api import async_playwright, Browser, Page
+from playwright.async_api import async_playwright, Browser, Page, BrowserContext, Playwright
 import asyncio
 import random
 from typing import Optional, Dict, List, Tuple, Any
@@ -962,4 +962,177 @@ class PlaywrightRunner:
         
         # Final scroll to exact position
         await page.evaluate(f"window.scrollTo(0, {target_position})")
-        await asyncio.sleep(random.uniform(0.2, 0.5)) 
+        await asyncio.sleep(random.uniform(0.2, 0.5))
+
+    async def init_browser_context(self, playwright: Playwright) -> Tuple[Browser, BrowserContext]:
+        """Инициализирует браузер и контекст с настроенными параметрами.
+        
+        Args:
+            playwright: Экземпляр Playwright
+            
+        Returns:
+            Tuple[Browser, BrowserContext]: Браузер и контекст
+        """
+        try:
+            # Запускаем браузер
+            browser = await playwright.chromium.launch(
+                headless=self.config.headless
+            )
+            
+            # Создаем контекст с настроенными параметрами
+            context = await browser.new_context(
+                user_agent=self.config.user_agent,
+                proxy=self.config.get_random_proxy() if self.config.proxy_enabled else None,
+                viewport={"width": 1920, "height": 1080},
+                device_scale_factor=1,
+                is_mobile=False,
+                has_touch=False,
+                locale="ru-RU",
+                timezone_id="Europe/Moscow",
+                geolocation={"latitude": 55.7558, "longitude": 37.6173},
+                permissions=["geolocation"]
+            )
+            
+            # Устанавливаем скрипты для обхода обнаружения
+            await context.add_init_script("""
+                // Переопределяем свойство webdriver
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => false
+                });
+                
+                // Добавляем фейковые свойства для Chrome
+                window.chrome = {
+                    runtime: {}
+                };
+                
+                // Эмулируем плагины
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        {
+                            0: {type: "application/x-google-chrome-pdf"},
+                            description: "Portable Document Format",
+                            filename: "internal-pdf-viewer",
+                            length: 1,
+                            name: "Chrome PDF Plugin"
+                        }
+                    ]
+                });
+            """)
+            
+            return browser, context
+            
+        except Exception as e:
+            logger.error(f"Ошибка при инициализации браузера: {str(e)}")
+            raise
+            
+    async def navigate(self, page: Page, url: str, timeout: int = None) -> bool:
+        """Выполняет навигацию по URL с эмуляцией человеческого поведения.
+        
+        Args:
+            page: Страница браузера
+            url: URL для перехода
+            timeout: Таймаут ожидания загрузки страницы
+            
+        Returns:
+            bool: True, если навигация успешна
+        """
+        try:
+            # Устанавливаем случайные куки
+            await page.evaluate("""() => {
+                document.cookie = `session_id=${Math.random().toString(36).substring(7)}`;
+                document.cookie = `user_id=${Math.random().toString(36).substring(7)}`;
+            }""")
+            
+            # Эмулируем человеческое поведение
+            await self._simulate_human_behavior(page)
+            
+            # Добавляем случайную задержку перед переходом
+            await asyncio.sleep(random.uniform(1, 3))
+            
+            # Устанавливаем заголовки запроса
+            await page.set_extra_http_headers({
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
+                "TE": "Trailers"
+            })
+            
+            # Выполняем навигацию
+            response = await page.goto(
+                url,
+                wait_until="networkidle",
+                timeout=timeout or self.config.timeout
+            )
+            
+            if not response:
+                logger.error(f"Не удалось получить ответ при переходе на {url}")
+                return False
+                
+            if not response.ok:
+                logger.error(f"Ошибка при переходе на {url}: {response.status}")
+                return False
+                
+            # Проверяем наличие капчи
+            if await self._check_captcha(page):
+                logger.warning(f"Обнаружена капча на {url}")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка при навигации на {url}: {str(e)}")
+            return False
+            
+    async def _simulate_human_behavior(self, page: Page) -> None:
+        """Эмулирует человеческое поведение на странице."""
+        try:
+            # Случайные движения мыши
+            for _ in range(random.randint(3, 7)):
+                await page.mouse.move(
+                    random.randint(0, 1000),
+                    random.randint(0, 1000)
+                )
+                await asyncio.sleep(random.uniform(0.1, 0.3))
+                
+            # Случайный скролл
+            await page.evaluate("""() => {
+                window.scrollTo({
+                    top: Math.random() * document.body.scrollHeight,
+                    behavior: 'smooth'
+                });
+            }""")
+            
+            await asyncio.sleep(random.uniform(1, 2))
+            
+        except Exception as e:
+            logger.warning(f"Ошибка при эмуляции поведения: {str(e)}")
+            
+    async def _check_captcha(self, page: Page) -> bool:
+        """Проверяет наличие капчи на странице."""
+        try:
+            # Проверяем различные селекторы капчи
+            captcha_selectors = [
+                "input[name='captcha']",
+                ".captcha-wrapper",
+                "#captcha",
+                "img[alt*='captcha']",
+                "div[class*='captcha']"
+            ]
+            
+            for selector in captcha_selectors:
+                if await page.query_selector(selector):
+                    return True
+                    
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Ошибка при проверке капчи: {str(e)}")
+            return False 

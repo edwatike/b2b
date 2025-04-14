@@ -1,92 +1,166 @@
-import httpx
-from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
-import random
+from typing import List, Optional, Dict
 import asyncio
+import random
 import logging
-from typing import Optional
+from datetime import datetime
+from fake_useragent import UserAgent
+from playwright.async_api import async_playwright, Browser, Page, Response
+from app.parser.playwright_runner import PlaywrightRunner
+from app.parser.helpers.human_like_behavior import (
+    random_scroll,
+    random_mouse_movement,
+    random_delay
+)
+from app.parser.helpers.captcha_solver import check_captcha
+import urllib.parse
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_random_headers() -> dict:
-    user_agent = UserAgent().random
-    return {
-        "User-Agent": user_agent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "DNT": "1",
-        "Referer": "https://yandex.ru/",
-        "Cookie": f"yandexuid={random.randint(1000000000, 9999999999)}"
-    }
+# Список прокси для ротации
+PROXY_LIST = []  # Отключаем использование прокси
 
-YANDEX_SEARCH_URL = "https://yandex.ru/search/"
-
-async def search_yandex(query: str, max_results: int = 10, proxy: Optional[str] = None) -> list[str]:
-    params = {
-        "text": query,
-        "lr": 213,
-        "p": random.randint(0, 5)  # Случайная страница
-    }
-
-    links = []
-    headers = get_random_headers()
-
+async def init_browser_context(playwright, proxy: Optional[str] = None):
+    """
+    Инициализирует контекст браузера с расширенными настройками анти-детекта.
+    """
+    browser_args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-automation',
+        '--disable-dev-shm-usage',
+        '--disable-web-security',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-site-isolation-trials'
+    ]
+    
     try:
-        async with httpx.AsyncClient(
-            timeout=30,
-            follow_redirects=True,
-            proxies=proxy,
-            headers=headers
-        ) as client:
-            # Добавляем случайную задержку перед запросом
-            await asyncio.sleep(random.uniform(2, 5))
-            
-            logger.info(f"Searching Yandex for query: {query}")
-            response = await client.get(
-                YANDEX_SEARCH_URL,
-                params=params
-            )
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
-                
-                # Пробуем разные селекторы для поиска результатов
-                selectors = [
-                    "div.serp-item a.link",
-                    "div.serp-item a.organic__url",
-                    "div.serp-item a.link_theme_outer",
-                    "div.serp-item a.link_theme_normal"
-                ]
-                
-                for selector in selectors:
-                    for tag in soup.select(selector):
-                        href = tag.get("href")
-                        if href and href.startswith("http") and "yabs.yandex" not in href:
-                            links.append(href)
-                            logger.info(f"Found link: {href}")
-                            if len(links) >= max_results:
-                                break
-                    if links:
-                        break
-                        
-                if not links:
-                    logger.warning("No links found with any selector")
-                    
-            else:
-                logger.error(f"Yandex search failed with status code: {response.status_code}")
-                logger.error(f"Response text: {response.text[:500]}")  # Первые 500 символов ответа
-                
-    except Exception as e:
-        logger.error(f"Error during Yandex search: {str(e)}")
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=browser_args
+        )
         
-    logger.info(f"Total results found: {len(links)}")
-    return links
+        # Базовые настройки контекста
+        context_settings = {
+            "viewport": {"width": 1920, "height": 1080},
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "locale": "ru-RU",
+            "timezone_id": "Europe/Moscow",
+            "geolocation": {"latitude": 55.7558, "longitude": 37.6173},  # Москва
+            "permissions": ["geolocation"],
+            "java_script_enabled": True,
+            "ignore_https_errors": True,
+            "bypass_csp": True
+        }
+        
+        if proxy:
+            context_settings["proxy"] = {"server": proxy}
+            
+        context = await browser.new_context(**context_settings)
+        
+        # Устанавливаем дополнительные заголовки
+        await context.set_extra_http_headers({
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0"
+        })
+        
+        return browser, context
+        
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации браузера: {str(e)}")
+        raise
+
+async def search_yandex(query: str, limit: int = 10) -> List[Dict]:
+    """
+    Выполняет поиск в Яндексе с использованием Playwright.
+    
+    Args:
+        query: Поисковый запрос
+        limit: Максимальное количество результатов
+        
+    Returns:
+        Список словарей с результатами поиска
+    """
+    logger.info(f"Начинаем поиск по запросу: {query}")
+    results = []
+    
+    try:
+        # Формируем URL для поиска
+        search_url = f"https://yandex.ru/search/?text={urllib.parse.quote_plus(query)}"
+        logger.info(f"Сформирован URL для поиска: {search_url}")
+        
+        # Инициализируем Playwright
+        async with async_playwright() as playwright:
+            logger.info("Инициализация браузера...")
+            browser, context = await init_browser_context(playwright)
+            page = await context.new_page()
+            
+            try:
+                # Эмулируем поведение пользователя перед переходом на страницу
+                logger.info("Эмуляция поведения пользователя...")
+                await random_delay(2, 4)
+                await random_mouse_movement(page)
+                
+                # Переходим на страницу поиска
+                logger.info(f"Переход на страницу поиска: {search_url}")
+                response = await page.goto(search_url, wait_until="networkidle")
+                logger.info(f"Статус ответа: {response.status}")
+                
+                # Проверяем на наличие капчи
+                logger.info("Проверка на наличие капчи...")
+                if await check_captcha(page):
+                    logger.warning("Обнаружена капча, пропускаем результат")
+                    return results
+                
+                # Делаем скриншот для диагностики
+                logger.info("Сохранение скриншота...")
+                await page.screenshot(path="/app/debug_screenshot.png")
+                
+                # Ждем загрузки результатов
+                logger.info("Ожидание загрузки результатов...")
+                await page.wait_for_selector(".serp-item", timeout=30000)
+                
+                # Извлекаем результаты
+                logger.info("Извлечение результатов...")
+                items = await page.query_selector_all(".serp-item")
+                logger.info(f"Найдено элементов: {len(items)}")
+                
+                for item in items[:limit]:
+                    try:
+                        title_elem = await item.query_selector(".organic__url-text")
+                        link_elem = await item.query_selector(".path a")
+                        
+                        if title_elem and link_elem:
+                            title = await title_elem.text_content()
+                            href = await link_elem.get_attribute("href")
+                            
+                            if title and href:
+                                logger.info(f"Найден результат: {title} -> {href}")
+                                results.append({
+                                    "title": title.strip(),
+                                    "url": href,
+                                    "result_url": href  # Добавляем result_url
+                                })
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке элемента: {str(e)}")
+                        continue
+                
+            finally:
+                await context.close()
+                await browser.close()
+                
+            logger.info(f"Поиск завершен. Найдено результатов: {len(results)}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении поиска: {str(e)}")
+        raise
+    
+    return results

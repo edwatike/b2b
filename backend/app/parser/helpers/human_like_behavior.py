@@ -220,4 +220,74 @@ class HumanLikeBehavior:
         Имитация перерыва, когда пользователь на время прекращает активность
         """
         break_time = random.uniform(min_seconds, max_seconds)
-        await asyncio.sleep(break_time) 
+        await asyncio.sleep(break_time)
+
+async def random_scroll(page: Page, min_scrolls: int = 2, max_scrolls: int = 5) -> None:
+    """
+    Эмулирует случайное прокручивание страницы.
+    
+    Args:
+        page: Страница Playwright
+        min_scrolls: Минимальное количество прокруток
+        max_scrolls: Максимальное количество прокруток
+    """
+    scroll_count = random.randint(min_scrolls, max_scrolls)
+    for _ in range(scroll_count):
+        # Случайная задержка между прокрутками
+        await asyncio.sleep(random.uniform(0.5, 2.0))
+        
+        # Случайное расстояние прокрутки
+        scroll_amount = random.randint(100, 500)
+        
+        # Случайное направление прокрутки
+        if random.random() < 0.5:
+            await page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+        else:
+            await page.evaluate(f"window.scrollBy(0, -{scroll_amount})")
+
+async def random_mouse_movement(page: Page, min_moves: int = 3, max_moves: int = 7) -> None:
+    """
+    Эмулирует случайные движения мыши.
+    
+    Args:
+        page: Страница Playwright
+        min_moves: Минимальное количество движений
+        max_moves: Максимальное количество движений
+    """
+    move_count = random.randint(min_moves, max_moves)
+    for _ in range(move_count):
+        # Случайная задержка между движениями
+        await asyncio.sleep(random.uniform(0.3, 1.5))
+        
+        # Случайные координаты
+        x = random.randint(0, 1000)
+        y = random.randint(0, 1000)
+        
+        # Перемещаем курсор
+        await page.mouse.move(x, y)
+
+async def random_delay(min_seconds: float = 1.0, max_seconds: float = 3.0) -> None:
+    """
+    Создает случайную задержку.
+    
+    Args:
+        min_seconds: Минимальная задержка в секундах
+        max_seconds: Максимальная задержка в секундах
+    """
+    delay = random.uniform(min_seconds, max_seconds)
+    await asyncio.sleep(delay)
+
+async def type_with_delay(page: Page, selector: str, text: str, min_delay: int = 100, max_delay: int = 300) -> None:
+    """
+    Эмулирует ввод текста с задержками между символами.
+    
+    Args:
+        page: Страница Playwright
+        selector: CSS-селектор элемента
+        text: Текст для ввода
+        min_delay: Минимальная задержка между символами (мс)
+        max_delay: Максимальная задержка между символами (мс)
+    """
+    for char in text:
+        await page.type(selector, char, delay=random.randint(min_delay, max_delay))
+        await asyncio.sleep(random.uniform(0.1, 0.3)) 
