@@ -1135,4 +1135,107 @@ class PlaywrightRunner:
             
         except Exception as e:
             logger.warning(f"Ошибка при проверке капчи: {str(e)}")
-            return False 
+            return False
+
+    async def get_page_content(self, url: str) -> str:
+        """Получает HTML-контент страницы"""
+        try:
+            logger.info(f"\n=== Начало получения контента для URL: {url} ===")
+            
+            # Получаем страницу из пула
+            logger.info("Получение страницы из пула...")
+            page = await self.get_page()
+            if not page:
+                logger.error("Не удалось получить страницу из пула")
+                return ""
+                
+            try:
+                # Устанавливаем таймаут и размер страницы
+                page.set_default_timeout(30000)
+                await page.set_viewport_size({"width": 1920, "height": 1080})
+                
+                # Переходим на страницу
+                logger.info("Переход на страницу...")
+                try:
+                    response = await page.goto(
+                        url,
+                        wait_until="networkidle",
+                        timeout=30000
+                    )
+                    
+                    if not response:
+                        logger.error(f"Не удалось получить ответ от {url}")
+                        return ""
+                        
+                    if response.status != 200:
+                        logger.error(f"Получен статус {response.status} от {url}")
+                        return ""
+                        
+                    logger.info(f"Успешный переход на страницу, статус: {response.status}")
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка при переходе на страницу {url}: {e}")
+                    return ""
+                
+                # Ждем загрузки контента
+                logger.info("Ожидание загрузки контента...")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    await asyncio.sleep(2)  # Дополнительная пауза для загрузки динамического контента
+                except Exception as e:
+                    logger.error(f"Ошибка при ожидании загрузки контента: {e}")
+                    return ""
+                
+                # Получаем HTML-контент
+                logger.info("Получение HTML-контента...")
+                try:
+                    html_content = await page.content()
+                    
+                    if not html_content:
+                        logger.error("Получен пустой HTML-контент")
+                        return ""
+                        
+                    content_size = len(html_content)
+                    logger.info(f"Успешно получен HTML-контент, размер: {content_size} байт")
+                    
+                    # Проверяем наличие основных элементов в HTML
+                    has_body = "body" in html_content.lower()
+                    has_head = "head" in html_content.lower()
+                    logger.info(f"Проверка HTML: body={'да' if has_body else 'нет'}, head={'да' if has_head else 'нет'}")
+                    
+                    if not has_body or not has_head:
+                        logger.warning("HTML-контент может быть некорректным")
+                        
+                    # Проверяем на наличие ошибок
+                    error_markers = [
+                        "404 not found",
+                        "403 forbidden",
+                        "access denied",
+                        "captcha",
+                        "blocked",
+                        "error"
+                    ]
+                    
+                    for marker in error_markers:
+                        if marker in html_content.lower():
+                            logger.warning(f"Найден маркер ошибки в HTML: {marker}")
+                    
+                    # Добавляем небольшую задержку для стабильности
+                    await asyncio.sleep(1)
+                    return html_content
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка при получении HTML-контента: {e}")
+                    return ""
+                
+            except Exception as e:
+                logger.error(f"Ошибка при работе со страницей: {e}")
+                return ""
+                
+            finally:
+                logger.info("Освобождение страницы...")
+                await self.release_page(page)
+                
+        except Exception as e:
+            logger.error(f"Критическая ошибка при работе с Playwright: {e}")
+            return "" 

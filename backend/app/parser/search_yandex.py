@@ -78,89 +78,87 @@ async def init_browser_context(playwright, proxy: Optional[str] = None):
         logger.error(f"Ошибка при инициализации браузера: {str(e)}")
         raise
 
-async def search_yandex(query: str, limit: int = 10) -> List[Dict]:
+async def search_yandex(query: str, limit: int = 100) -> List[Dict[str, str]]:
     """
-    Выполняет поиск в Яндексе с использованием Playwright.
+    Выполняет поиск в Яндексе и возвращает результаты с HTML-контентом.
     
     Args:
         query: Поисковый запрос
         limit: Максимальное количество результатов
         
     Returns:
-        Список словарей с результатами поиска
+        List[Dict[str, str]]: Список результатов поиска
     """
-    logger.info(f"Начинаем поиск по запросу: {query}")
-    results = []
-    
     try:
-        # Формируем URL для поиска
-        search_url = f"https://yandex.ru/search/?text={urllib.parse.quote_plus(query)}"
-        logger.info(f"Сформирован URL для поиска: {search_url}")
-        
-        # Инициализируем Playwright
-        async with async_playwright() as playwright:
-            logger.info("Инициализация браузера...")
-            browser, context = await init_browser_context(playwright)
-            page = await context.new_page()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
             
-            try:
-                # Эмулируем поведение пользователя перед переходом на страницу
-                logger.info("Эмуляция поведения пользователя...")
-                await random_delay(2, 4)
-                await random_mouse_movement(page)
+            results = []
+            page_num = 0
+            
+            while len(results) < limit:
+                # Формируем URL для текущей страницы
+                search_url = f"https://yandex.ru/search/?text={query}&p={page_num}"
+                logger.info(f"Fetching page {page_num + 1} from: {search_url}")
                 
-                # Переходим на страницу поиска
-                logger.info(f"Переход на страницу поиска: {search_url}")
-                response = await page.goto(search_url, wait_until="networkidle")
-                logger.info(f"Статус ответа: {response.status}")
+                # Загружаем страницу
+                await page.goto(search_url)
+                await page.wait_for_selector('.serp-item')
                 
-                # Проверяем на наличие капчи
-                logger.info("Проверка на наличие капчи...")
-                if await check_captcha(page):
-                    logger.warning("Обнаружена капча, пропускаем результат")
-                    return results
+                # Получаем результаты на странице
+                items = await page.query_selector_all('.serp-item')
                 
-                # Делаем скриншот для диагностики
-                logger.info("Сохранение скриншота...")
-                await page.screenshot(path="/app/debug_screenshot.png")
-                
-                # Ждем загрузки результатов
-                logger.info("Ожидание загрузки результатов...")
-                await page.wait_for_selector(".serp-item", timeout=30000)
-                
-                # Извлекаем результаты
-                logger.info("Извлечение результатов...")
-                items = await page.query_selector_all(".serp-item")
-                logger.info(f"Найдено элементов: {len(items)}")
-                
-                for item in items[:limit]:
-                    try:
-                        title_elem = await item.query_selector(".organic__url-text")
-                        link_elem = await item.query_selector(".path a")
+                if not items:
+                    break
+                    
+                for item in items:
+                    if len(results) >= limit:
+                        break
                         
-                        if title_elem and link_elem:
-                            title = await title_elem.text_content()
-                            href = await link_elem.get_attribute("href")
+                    try:
+                        # Получаем ссылку и заголовок
+                        link_elem = await item.query_selector('a.link')
+                        if not link_elem:
+                            continue
                             
-                            if title and href:
-                                logger.info(f"Найден результат: {title} -> {href}")
-                                results.append({
-                                    "title": title.strip(),
-                                    "url": href,
-                                    "result_url": href  # Добавляем result_url
-                                })
+                        url = await link_elem.get_attribute('href')
+                        title = await link_elem.inner_text()
+                        
+                        if not url:
+                            continue
+                            
+                        # Получаем HTML-контент страницы
+                        try:
+                            result_page = await browser.new_page()
+                            await result_page.goto(url, timeout=30000)
+                            html_content = await result_page.content()
+                            await result_page.close()
+                        except Exception as e:
+                            logger.error(f"Error fetching content from {url}: {e}")
+                            html_content = ""
+                        
+                        # Добавляем результат
+                        results.append({
+                            'url': url,
+                            'title': title,
+                            'html_content': html_content
+                        })
+                        
+                        logger.info(f"Added result: {url}")
+                        
                     except Exception as e:
-                        logger.error(f"Ошибка при обработке элемента: {str(e)}")
+                        logger.error(f"Error processing search result: {e}")
                         continue
                 
-            finally:
-                await context.close()
-                await browser.close()
+                page_num += 1
                 
-            logger.info(f"Поиск завершен. Найдено результатов: {len(results)}")
+                # Добавляем задержку между запросами
+                await asyncio.sleep(random.uniform(1, 3))
+            
+            await browser.close()
+            return results
             
     except Exception as e:
-        logger.error(f"Ошибка при выполнении поиска: {str(e)}")
-        raise
-    
-    return results
+        logger.error(f"Error in search_yandex: {e}")
+        return []
