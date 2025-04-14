@@ -5,9 +5,9 @@ services:
     image: postgres:15
     container_name: b2b_db_1
     environment:
-      POSTGRES_USER: b2b_user
-      POSTGRES_PASSWORD: b2b_pass
-      POSTGRES_DB: b2b_db
+      - POSTGRES_USER=b2b_user
+      - POSTGRES_PASSWORD=b2b_pass
+      - POSTGRES_DB=b2b_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -16,19 +16,20 @@ services:
       - "5432:5432"
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: b2b-backend
-    command: bash -c "chmod +x /app/wait-for-db.sh && /app/wait-for-db.sh db && uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level debug"
+    command: bash -c "chmod +x /app/wait-for-db.sh && /app/wait-for-db.sh db && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level debug"
     volumes:
       - ./backend:/app
+      - ./backend/debug_screenshots:/app/debug_screenshots
     ports:
-      - "8001:8001"
+      - "8001:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://b2b_user:b2b_pass@db:5432/b2b_db
-      POSTGRES_USER: b2b_user
-      POSTGRES_PASSWORD: b2b_pass
-      POSTGRES_DB: b2b_db
-      PYTHONUNBUFFERED: 1
+      - SEARCH_MODE=${SEARCH_MODE:-yandex}
+    env_file:
+      - ./backend/.env
     depends_on:
       - db
     networks:

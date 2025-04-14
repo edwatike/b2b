@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from urllib.parse import urlparse
 from sqlalchemy import select
 from app.db.session import async_session
@@ -7,52 +7,138 @@ from .playwright_runner import PlaywrightRunner
 from .parser_config import ParserConfig
 from playwright.async_api import async_playwright
 import logging
+import asyncio
+import os
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 class ParserService:
     def __init__(self):
         self.config = ParserConfig()
+        self.config.validate()  # Проверяем корректность настроек
         self.playwright_runner = PlaywrightRunner(config=self.config)
         
-    async def search_and_save(self, keyword: str, max_results: int = 1000, search_engine: str = "yandex") -> List[Dict[str, str]]:
+    def get_current_search_mode(self) -> str:
+        """Получает текущий режим поиска из переменной окружения или конфига."""
+        return os.getenv("SEARCH_MODE", self.config.search_mode)
+        
+    async def search_and_save(self, keyword: str, max_results: int = None) -> Dict[str, Union[List[Dict[str, str]], int, str]]:
         """Выполняет поиск и сохраняет результаты в базу данных.
         
         Args:
             keyword: Ключевое слово для поиска
-            max_results: Максимальное количество результатов
-            search_engine: Поисковая система (yandex или google)
+            max_results: Максимальное количество результатов (если None, используется значение из конфига)
             
         Returns:
-            List[Dict[str, str]]: Список результатов поиска
+            Dict[str, Union[List[Dict[str, str]], int, str]]: Результаты поиска
         """
         try:
+            # Используем значения из конфига, если параметры не указаны
+            max_results = max_results or self.config.max_results
+            search_mode = self.get_current_search_mode()
+
+            logger.info(f"Начинаем поиск с настройками: mode={search_mode}, max_results={max_results}")
+
             # Проверяем кэш
             cached_results = await self.get_cached_results(keyword, max_results)
             if cached_results:
                 logger.info(f"Найдены кэшированные результаты для запроса '{keyword}'")
                 return cached_results
 
-            # Выполняем поиск
-            if search_engine == "yandex":
-                from .search_yandex import search_yandex
-                results = await search_yandex(query=keyword, limit=max_results)
+            # Выполняем поиск в соответствии с настройками
+            if search_mode == "both":
+                results = await self.parallel_search(keyword, max_results)
             else:
-                from .search_google import search_google
-                results = await search_google(query=keyword, limit=max_results)
+                if search_mode == "yandex":
+                    from .search_yandex import search_yandex
+                    results = await search_yandex(query=keyword, limit=max_results)
+                elif search_mode == "google":
+                    from .search_google import search_google
+                    results = await search_google(query=keyword, limit=max_results)
+                else:
+                    raise ValueError(f"Недопустимый режим поиска: {search_mode}")
             
             # Сохраняем результаты в базу данных
             if results:
                 await self.save_results(keyword, results)
                 logger.info(f"Сохранено {len(results)} результатов для запроса '{keyword}'")
             
-            return results
+            # Ограничиваем количество результатов
+            final_results = results[:max_results]
+            
+            return {
+                "results": final_results,
+                "total": len(final_results),
+                "cached": 0,
+                "new": len(final_results),
+                "search_mode": search_mode  # Используем текущий режим поиска
+            }
             
         except Exception as e:
             logger.error(f"Ошибка при выполнении поиска: {str(e)}")
             raise
+
+    async def parallel_search(self, keyword: str, max_results: int) -> List[Dict[str, str]]:
+        """Выполняет параллельный поиск в обеих поисковых системах.
+        
+        Args:
+            keyword: Ключевое слово для поиска
+            max_results: Максимальное количество результатов
             
-    async def get_cached_results(self, keyword: str, max_results: int) -> Optional[List[Dict[str, str]]]:
+        Returns:
+            List[Dict[str, str]]: Объединенный список результатов поиска
+        """
+        try:
+            from .search_yandex import search_yandex
+            from .search_google import search_google
+
+            logger.info("Запускаем параллельный поиск в Яндекс и Google")
+
+            # Запускаем поиск параллельно
+            yandex_task = search_yandex(query=keyword, limit=max_results)
+            google_task = search_google(query=keyword, limit=max_results)
+            
+            yandex_results, google_results = await asyncio.gather(
+                yandex_task,
+                google_task,
+                return_exceptions=True
+            )
+
+            # Обрабатываем результаты
+            all_results = []
+            seen_urls = set()  # Для дедупликации результатов
+
+            # Добавляем результаты Яндекса
+            if isinstance(yandex_results, list):
+                logger.info(f"Получено {len(yandex_results)} результатов от Яндекса")
+                for result in yandex_results:
+                    if result["url"] not in seen_urls:
+                        seen_urls.add(result["url"])
+                        all_results.append(result)
+
+            # Добавляем результаты Google
+            if isinstance(google_results, list):
+                logger.info(f"Получено {len(google_results)} результатов от Google")
+                for result in google_results:
+                    if result["url"] not in seen_urls:
+                        seen_urls.add(result["url"])
+                        all_results.append(result)
+
+            # Сортируем результаты по релевантности
+            all_results.sort(key=lambda x: len(x.get("title", "")), reverse=True)
+            
+            # Ограничиваем количество результатов
+            final_results = all_results[:max_results]
+            logger.info(f"Всего найдено уникальных результатов: {len(final_results)}")
+            
+            return final_results
+
+        except Exception as e:
+            logger.error(f"Ошибка при параллельном поиске: {str(e)}")
+            raise
+
+    async def get_cached_results(self, keyword: str, max_results: int) -> Optional[Dict[str, Union[List[Dict[str, str]], int, str]]]:
         """Проверяет наличие кэшированных результатов поиска.
         
         Args:
@@ -60,7 +146,7 @@ class ParserService:
             max_results: Максимальное количество результатов
             
         Returns:
-            Optional[List[Dict[str, str]]]: Список кэшированных результатов или None
+            Optional[Dict[str, Union[List[Dict[str, str]], int, str]]]: Словарь с кэшированными результатами или None
         """
         try:
             async with async_session() as session:
@@ -73,11 +159,19 @@ class ParserService:
                 cached_results = results.scalars().all()
                 
                 if cached_results:
-                    return [{
+                    results_list = [{
                         "url": result.url,
                         "title": result.title or "",
                         "domain": result.domain or ""
                     } for result in cached_results]
+                    
+                    return {
+                        "results": results_list,
+                        "total": len(results_list),
+                        "cached": len(results_list),
+                        "new": 0,
+                        "search_mode": self.get_current_search_mode()
+                    }
                     
         except Exception as e:
             logger.error(f"Ошибка при получении кэшированных результатов: {str(e)}")
