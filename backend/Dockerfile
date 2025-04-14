@@ -1,45 +1,39 @@
-FROM python:3.12-slim
-
-# Настраиваем сеть и устанавливаем все необходимые пакеты в одном слое
-ENV DEBIAN_FRONTEND=noninteractive
-RUN echo "Acquire::http::Pipeline-Depth 0;" > /etc/apt/apt.conf.d/99pipelines && \
-    echo "Acquire::http::No-Cache true;" >> /etc/apt/apt.conf.d/99pipelines && \
-    echo "Acquire::http::Keep-Alive false;" >> /etc/apt/apt.conf.d/99pipelines && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    python3-dev \
-    libpq-dev \
-    postgresql-client \
-    wget \
-    gnupg \
-    unzip \
-    # Добавляем и устанавливаем Chrome в том же слое
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable \
-    # Очищаем кэш и ненужные файлы
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /var/cache/apt/*
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Копируем только необходимые файлы для установки зависимостей
-COPY pip.conf /etc/pip.conf
-COPY requirements.txt .
-
-# Устанавливаем зависимости Python
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Копируем скрипт ожидания и делаем его исполняемым
-COPY wait-for-db.sh /wait-for-db.sh
-RUN chmod +x /wait-for-db.sh
-
-# Копируем остальные файлы проекта
+# Copy the application code
 COPY . .
 
-# Запускаем приложение
-CMD ["/wait-for-db.sh", "db", "gunicorn", "app.main:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+# Install system dependencies and Python dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    software-properties-common \
+    git \
+    postgresql-client \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libatspi2.0-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libxkbcommon0 \
+    libasound2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt \
+    && playwright install chromium
+
+# Make the wait-for-db script executable
+RUN chmod +x /app/wait-for-db.sh
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Run the application
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
