@@ -53,3 +53,4 @@ PyJWT
 pytest
 pytest-asyncio
 pytest-cov
+aiohttp>=3.8.1

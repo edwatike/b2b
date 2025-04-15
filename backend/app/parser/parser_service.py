@@ -1,10 +1,11 @@
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Set
 from urllib.parse import urlparse
 from sqlalchemy import select
 from app.db.session import async_session
 from app.models.search_result import SearchResult
 from .playwright_runner import PlaywrightRunner
 from .parser_config import ParserConfig
+from .site_classifier import SiteClassifier
 from playwright.async_api import async_playwright
 import logging
 import asyncio
@@ -20,6 +21,7 @@ class ParserService:
         self.config = ParserConfig()
         self.config.validate()  # Проверяем корректность настроек
         self.playwright_runner = PlaywrightRunner(config=self.config)
+        self.site_classifier = SiteClassifier()  # Добавляем классификатор сайтов
         self.results_dir = "/app/results"  # Путь к директории результатов внутри контейнера
         
         # Проверяем и создаем директорию для результатов, если она не существует
@@ -32,6 +34,18 @@ class ParserService:
                 # Используем резервный путь
                 self.results_dir = "results"
                 os.makedirs(self.results_dir, exist_ok=True)
+        
+        # Директории для категорий сайтов
+        self.suppliers_dir = os.path.join(self.results_dir, "suppliers")
+        self.others_dir = os.path.join(self.results_dir, "others")
+        self.sites_dir = os.path.join(self.results_dir, "sites")
+        
+        # Создаем директории для категорий, если они не существуют
+        for directory in [self.suppliers_dir, self.others_dir, self.sites_dir]:
+            os.makedirs(directory, exist_ok=True)
+            
+        # Множество уже обработанных доменов для избежания дублирования
+        self.processed_domains: Set[str] = set()
         
     def get_current_search_mode(self) -> str:
         """Получает текущий режим поиска из переменной окружения или конфига."""
@@ -74,20 +88,34 @@ class ParserService:
                 else:
                     raise ValueError(f"Недопустимый режим поиска: {search_mode}")
             
+            # Удаляем дубликаты по домену
+            unique_results = await self.remove_domain_duplicates(results)
+            logger.info(f"После удаления дубликатов: {len(unique_results)} из {len(results)} результатов")
+            
+            # Классифицируем сайты
+            await self.classify_sites(unique_results, keyword)
+            
             # Сохраняем результаты в базу данных
-            if results:
-                await self.save_results(keyword, results)
-                logger.info(f"Сохранено {len(results)} результатов для запроса '{keyword}'")
+            if unique_results:
+                await self.save_results(keyword, unique_results)
+                logger.info(f"Сохранено {len(unique_results)} результатов для запроса '{keyword}'")
             
             # Ограничиваем количество результатов
-            final_results = results[:max_results]
+            final_results = unique_results[:max_results]
+            
+            # Получаем статистику классификации
+            classification_stats = self.site_classifier.get_stats()
             
             return {
                 "results": final_results,
                 "total": len(final_results),
                 "cached": 0,
                 "new": len(final_results),
-                "search_mode": search_mode  # Используем текущий режим поиска
+                "search_mode": search_mode,  # Используем текущий режим поиска
+                "suppliers": classification_stats['suppliers_found'],
+                "others": classification_stats['others_found'],
+                "errors": classification_stats['errors'],
+                "duplicates_removed": len(results) - len(unique_results)
             }
             
         except Exception as e:
@@ -225,13 +253,114 @@ class ParserService:
             logger.error(f"Ошибка при сохранении результатов: {str(e)}")
             raise 
 
-    async def save_results_to_file(self, keyword: str, results: List[Dict[str, str]], format: str = "json") -> str:
+    async def remove_domain_duplicates(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """
+        Удаляет дубликаты по домену из списка результатов.
+        
+        Args:
+            results: Список результатов поиска
+            
+        Returns:
+            List[Dict[str, str]]: Список уникальных результатов
+        """
+        unique_results = []
+        seen_domains = set()
+        
+        for result in results:
+            url = result.get("url", "")
+            if not url:
+                continue
+                
+            try:
+                parsed_url = urlparse(url)
+                domain = parsed_url.netloc
+                
+                # Удаляем www. из домена, если есть
+                if domain.startswith('www.'):
+                    domain = domain[4:]
+                
+                # Проверяем, был ли уже обработан этот домен
+                if domain in seen_domains or domain in self.processed_domains:
+                    logger.info(f"Пропускаем дубликат домена: {domain}")
+                    continue
+                
+                # Добавляем домен в множество обработанных
+                seen_domains.add(domain)
+                
+                # Добавляем результат в список уникальных
+                unique_results.append(result)
+                
+                # Извлекаем и добавляем домен в результат
+                result["domain"] = domain
+                
+            except Exception as e:
+                logger.error(f"Ошибка при обработке URL {url}: {str(e)}")
+                # Добавляем результат, даже если не смогли извлечь домен
+                unique_results.append(result)
+        
+        return unique_results
+        
+    async def classify_sites(self, results: List[Dict[str, str]], keyword: str) -> None:
+        """
+        Классифицирует сайты и сохраняет их в соответствующие файлы.
+        
+        Args:
+            results: Список результатов поиска
+            keyword: Ключевое слово для поиска
+        """
+        try:
+            logger.info(f"Классифицируем {len(results)} сайтов")
+            
+            # Классифицируем сайты
+            suppliers, others = await self.site_classifier.classify_batch(results)
+            
+            logger.info(f"Классификация завершена: {len(suppliers)} поставщиков, {len(others)} других сайтов")
+            
+            # Сохраняем поставщиков
+            if suppliers:
+                timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                safe_keyword = "".join(c if c.isalnum() else "_" for c in keyword)
+                
+                # Сохраняем в JSON
+                suppliers_file = os.path.join(self.suppliers_dir, f"{safe_keyword}_{timestamp}.json")
+                with open(suppliers_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "query": keyword,
+                        "timestamp": timestamp,
+                        "count": len(suppliers),
+                        "results": suppliers
+                    }, f, ensure_ascii=False, indent=2)
+                
+                logger.info(f"Поставщики сохранены в файл: {suppliers_file}")
+                
+            # Сохраняем другие сайты
+            if others:
+                timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                safe_keyword = "".join(c if c.isalnum() else "_" for c in keyword)
+                
+                # Сохраняем в JSON
+                others_file = os.path.join(self.others_dir, f"{safe_keyword}_{timestamp}.json")
+                with open(others_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "query": keyword,
+                        "timestamp": timestamp,
+                        "count": len(others),
+                        "results": others
+                    }, f, ensure_ascii=False, indent=2)
+                
+                logger.info(f"Другие сайты сохранены в файл: {others_file}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при классификации сайтов: {str(e)}")
+
+    async def save_results_to_file(self, keyword: str, results: List[Dict[str, str]], format: str = "json", classify: bool = True) -> str:
         """Сохраняет результаты поиска в файл.
         
         Args:
             keyword: Ключевое слово для поиска
             results: Список результатов поиска
             format: Формат файла (json, csv, txt)
+            classify: Классифицировать ли сайты
             
         Returns:
             str: Путь к файлу с результатами
@@ -242,9 +371,16 @@ class ParserService:
             # Заменяем недопустимые символы в имени файла
             safe_keyword = "".join(c if c.isalnum() else "_" for c in keyword)
             
+            # Если нужно классифицировать, делаем это
+            if classify and results:
+                await self.classify_sites(results, keyword)
+            
+            # Определяем директорию для сохранения (общая, без классификации)
+            target_dir = self.sites_dir
+            
             if format.lower() == "json":
                 filename = f"{safe_keyword}_{timestamp}.json"
-                filepath = os.path.join(self.results_dir, filename)
+                filepath = os.path.join(target_dir, filename)
                 
                 # Формируем данные для сохранения
                 data = {
@@ -263,7 +399,7 @@ class ParserService:
                 
             elif format.lower() == "csv":
                 filename = f"{safe_keyword}_{timestamp}.csv"
-                filepath = os.path.join(self.results_dir, filename)
+                filepath = os.path.join(target_dir, filename)
                 
                 # Сохраняем в CSV
                 with open(filepath, "w", encoding="utf-8") as f:
@@ -282,7 +418,7 @@ class ParserService:
                 
             elif format.lower() == "txt":
                 filename = f"{safe_keyword}_{timestamp}.txt"
-                filepath = os.path.join(self.results_dir, filename)
+                filepath = os.path.join(target_dir, filename)
                 
                 # Сохраняем в текстовый файл
                 with open(filepath, "w", encoding="utf-8") as f:
