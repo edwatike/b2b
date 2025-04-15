@@ -24,6 +24,7 @@ services:
     volumes:
       - ./backend:/app
       - ./backend/debug_screenshots:/app/debug_screenshots
+      - ./backend/results:/app/results
     ports:
       - "8001:8000"
     environment:

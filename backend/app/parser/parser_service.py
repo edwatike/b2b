@@ -10,6 +10,8 @@ import logging
 import asyncio
 import os
 from collections import defaultdict
+import json
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,18 @@ class ParserService:
         self.config = ParserConfig()
         self.config.validate()  # Проверяем корректность настроек
         self.playwright_runner = PlaywrightRunner(config=self.config)
+        self.results_dir = "/app/results"  # Путь к директории результатов внутри контейнера
+        
+        # Проверяем и создаем директорию для результатов, если она не существует
+        if not os.path.exists(self.results_dir):
+            try:
+                os.makedirs(self.results_dir, exist_ok=True)
+                logger.info(f"Создана директория для результатов: {self.results_dir}")
+            except Exception as e:
+                logger.error(f"Не удалось создать директорию для результатов: {str(e)}")
+                # Используем резервный путь
+                self.results_dir = "results"
+                os.makedirs(self.results_dir, exist_ok=True)
         
     def get_current_search_mode(self) -> str:
         """Получает текущий режим поиска из переменной окружения или конфига."""
@@ -206,6 +220,87 @@ class ParserService:
                     session.add(search_result)
                 
                 await session.commit()
+                
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении результатов: {str(e)}")
+            raise 
+
+    async def save_results_to_file(self, keyword: str, results: List[Dict[str, str]], format: str = "json") -> str:
+        """Сохраняет результаты поиска в файл.
+        
+        Args:
+            keyword: Ключевое слово для поиска
+            results: Список результатов поиска
+            format: Формат файла (json, csv, txt)
+            
+        Returns:
+            str: Путь к файлу с результатами
+        """
+        try:
+            # Создаем уникальное имя файла на основе запроса и времени
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            # Заменяем недопустимые символы в имени файла
+            safe_keyword = "".join(c if c.isalnum() else "_" for c in keyword)
+            
+            if format.lower() == "json":
+                filename = f"{safe_keyword}_{timestamp}.json"
+                filepath = os.path.join(self.results_dir, filename)
+                
+                # Формируем данные для сохранения
+                data = {
+                    "query": keyword,
+                    "timestamp": timestamp,
+                    "count": len(results),
+                    "results": results
+                }
+                
+                # Сохраняем в JSON
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                
+                logger.info(f"Результаты сохранены в файл: {filepath}")
+                return filepath
+                
+            elif format.lower() == "csv":
+                filename = f"{safe_keyword}_{timestamp}.csv"
+                filepath = os.path.join(self.results_dir, filename)
+                
+                # Сохраняем в CSV
+                with open(filepath, "w", encoding="utf-8") as f:
+                    # Записываем заголовки
+                    f.write("title,url,domain\n")
+                    
+                    # Записываем данные
+                    for result in results:
+                        title = result.get("title", "").replace('"', '""')  # Экранируем кавычки
+                        url = result.get("url", "")
+                        domain = result.get("domain", "")
+                        f.write(f'"{title}",{url},{domain}\n')
+                
+                logger.info(f"Результаты сохранены в файл: {filepath}")
+                return filepath
+                
+            elif format.lower() == "txt":
+                filename = f"{safe_keyword}_{timestamp}.txt"
+                filepath = os.path.join(self.results_dir, filename)
+                
+                # Сохраняем в текстовый файл
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(f"Результаты поиска по запросу: {keyword}\n")
+                    f.write(f"Дата и время: {timestamp}\n")
+                    f.write(f"Количество результатов: {len(results)}\n\n")
+                    
+                    for i, result in enumerate(results, 1):
+                        f.write(f"{i}. {result.get('title', '')}\n")
+                        f.write(f"   URL: {result.get('url', '')}\n")
+                        f.write(f"   Домен: {result.get('domain', '')}\n\n")
+                
+                logger.info(f"Результаты сохранены в файл: {filepath}")
+                return filepath
+            
+            else:
+                logger.error(f"Неподдерживаемый формат файла: {format}")
+                raise ValueError(f"Неподдерживаемый формат файла: {format}")
                 
         except Exception as e:
             logger.error(f"Ошибка при сохранении результатов: {str(e)}")
