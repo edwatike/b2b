@@ -5,7 +5,7 @@ from ..parser.models import SearchRequest, SearchResponse, SearchResult
 from ..parser.parser_service import ParserService
 from ..parser.playwright_runner import PlaywrightRunner
 from ..parser.config.parser_config import config
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 import os
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,26 @@ parser_service = ParserService()
 
 class SearchRequest(BaseModel):
     query: str
-    limit: int = 15
+    limit: int = 100  # Увеличиваем лимит по умолчанию
+    pages: int = 1
+
+    @validator('limit')
+    def validate_limit(cls, v):
+        if v <= 0:
+            raise ValueError("Лимит должен быть положительным числом")
+        if v > 200:  # Устанавливаем максимальный лимит
+            logger.warning(f"Запрошен лимит {v}, ограничиваем до 200")
+            return 200
+        return v
+
+    @validator('pages')
+    def validate_pages(cls, v):
+        if v <= 0:
+            raise ValueError("Количество страниц должно быть положительным числом")
+        if v > 20:  # Устанавливаем максимальное количество страниц
+            logger.warning(f"Запрошено {v} страниц, ограничиваем до 20")
+            return 20
+        return v
 
 class SearchResponse(BaseModel):
     results: List[Dict[str, str]]
@@ -50,6 +69,7 @@ async def search(request: SearchRequest):
         request: Запрос на поиск, содержащий:
             - query: Поисковый запрос
             - limit: Максимальное количество результатов
+            - pages: Количество страниц для парсинга
             
     Returns:
         SearchResponse: Результаты поиска
@@ -57,13 +77,15 @@ async def search(request: SearchRequest):
     try:
         logger.info(f"Получен запрос на поиск: {request.query}")
         logger.info(f"Максимальное количество результатов: {request.limit}")
+        logger.info(f"Количество страниц для парсинга: {request.pages}")
 
         current_mode = parser_service.get_current_search_mode()
         logger.info(f"Текущий режим поиска: {current_mode}")
 
         results = await parser_service.search_and_save(
             keyword=request.query,
-            max_results=request.limit
+            max_results=request.limit,
+            pages=request.pages
         )
         logger.info(f"Получены результаты: {results}")
 

@@ -1,24 +1,16 @@
-from typing import List, Dict, Optional, Union, Any
+from typing import List, Dict, Optional, Union
 from urllib.parse import urlparse
 from sqlalchemy import select
-from ..db.session import async_session
-from ..models.search_result import SearchResult
+from app.db.session import async_session
+from app.models.search_result import SearchResult
 from .playwright_runner import PlaywrightRunner
 from .parser_config import ParserConfig
-from .filter import process_results
 from playwright.async_api import async_playwright
 import logging
 import asyncio
 import os
 from collections import defaultdict
-import traceback
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 logger = logging.getLogger(__name__)
 
 class ParserService:
@@ -26,24 +18,18 @@ class ParserService:
         self.config = ParserConfig()
         self.config.validate()  # Проверяем корректность настроек
         self.playwright_runner = PlaywrightRunner(config=self.config)
-        # Создаем директории для сохранения результатов
-        self.results_dir = os.path.join(os.getcwd(), "results")
-        self.suppliers_dir = os.path.join(self.results_dir, "suppliers")
-        self.others_dir = os.path.join(self.results_dir, "others")
-        os.makedirs(self.suppliers_dir, exist_ok=True)
-        os.makedirs(self.others_dir, exist_ok=True)
         
     def get_current_search_mode(self) -> str:
         """Получает текущий режим поиска из переменной окружения или конфига."""
         return os.getenv("SEARCH_MODE", self.config.search_mode)
         
-    async def search_and_save(self, keyword: str, max_results: int = None, force_update: bool = False) -> Dict[str, Union[List[Dict[str, str]], int, str]]:
+    async def search_and_save(self, keyword: str, max_results: int = None, pages: int = 1) -> Dict[str, Union[List[Dict[str, str]], int, str]]:
         """Выполняет поиск и сохраняет результаты в базу данных.
         
         Args:
             keyword: Ключевое слово для поиска
             max_results: Максимальное количество результатов (если None, используется значение из конфига)
-            force_update: Принудительное обновление результатов, игнорируя кэш
+            pages: Количество страниц для парсинга
             
         Returns:
             Dict[str, Union[List[Dict[str, str]], int, str]]: Результаты поиска
@@ -53,25 +39,24 @@ class ParserService:
             max_results = max_results or self.config.max_results
             search_mode = self.get_current_search_mode()
 
-            logger.info(f"Начинаем поиск с настройками: mode={search_mode}, max_results={max_results}, force_update={force_update}")
+            logger.info(f"Начинаем поиск с настройками: mode={search_mode}, max_results={max_results}, pages={pages}")
 
-            # Проверяем кэш только если не требуется принудительное обновление
-            if not force_update:
-                cached_results = await self.get_cached_results(keyword, max_results)
-                if cached_results:
-                    logger.info(f"Найдены кэшированные результаты для запроса '{keyword}'")
-                    return cached_results
+            # Проверяем кэш
+            cached_results = await self.get_cached_results(keyword, max_results)
+            if cached_results:
+                logger.info(f"Найдены кэшированные результаты для запроса '{keyword}'")
+                return cached_results
 
             # Выполняем поиск в соответствии с настройками
             if search_mode == "both":
-                results = await self.parallel_search(keyword, max_results)
+                results = await self.parallel_search(keyword, max_results, pages)
             else:
                 if search_mode == "yandex":
                     from .search_yandex import search_yandex
-                    results = await search_yandex(query=keyword, limit=max_results)
+                    results = await search_yandex(query=keyword, limit=max_results, pages=pages)
                 elif search_mode == "google":
                     from .search_google import search_google
-                    results = await search_google(query=keyword, limit=max_results)
+                    results = await search_google(query=keyword, limit=max_results, pages=pages)
                 else:
                     raise ValueError(f"Недопустимый режим поиска: {search_mode}")
             
@@ -88,19 +73,20 @@ class ParserService:
                 "total": len(final_results),
                 "cached": 0,
                 "new": len(final_results),
-                "search_mode": search_mode
+                "search_mode": search_mode  # Используем текущий режим поиска
             }
             
         except Exception as e:
             logger.error(f"Ошибка при выполнении поиска: {str(e)}")
             raise
 
-    async def parallel_search(self, keyword: str, max_results: int) -> List[Dict[str, str]]:
+    async def parallel_search(self, keyword: str, max_results: int, pages: int = 1) -> List[Dict[str, str]]:
         """Выполняет параллельный поиск в обеих поисковых системах.
         
         Args:
             keyword: Ключевое слово для поиска
             max_results: Максимальное количество результатов
+            pages: Количество страниц для парсинга
             
         Returns:
             List[Dict[str, str]]: Объединенный список результатов поиска
@@ -109,11 +95,11 @@ class ParserService:
             from .search_yandex import search_yandex
             from .search_google import search_google
 
-            logger.info("Запускаем параллельный поиск в Яндекс и Google")
+            logger.info(f"Запускаем параллельный поиск в Яндекс и Google на {pages} страницах")
 
             # Запускаем поиск параллельно
-            yandex_task = search_yandex(query=keyword, limit=max_results)
-            google_task = search_google(query=keyword, limit=max_results)
+            yandex_task = search_yandex(query=keyword, limit=max_results, pages=pages)
+            google_task = search_google(query=keyword, limit=max_results, pages=pages)
             
             yandex_results, google_results = await asyncio.gather(
                 yandex_task,
@@ -223,95 +209,4 @@ class ParserService:
                 
         except Exception as e:
             logger.error(f"Ошибка при сохранении результатов: {str(e)}")
-            raise
-
-    async def search(self, query: str, limit: int = 30, pages: int = 3, search_engine: str = "yandex") -> List[Dict[str, Any]]:
-        """
-        Выполняет поиск по заданному запросу
-        
-        Args:
-            query: Поисковый запрос
-            limit: Максимальное количество результатов
-            pages: Количество страниц для обработки
-            search_engine: Поисковая система ("yandex" или "google")
-            
-        Returns:
-            List[Dict]: Список результатов поиска
-        """
-        logger.debug(f"\n=== Начало поиска ===")
-        logger.debug(f"Запрос: {query}")
-        logger.debug(f"Лимит: {limit}")
-        logger.debug(f"Страниц: {pages}")
-        logger.debug(f"Поисковая система: {search_engine}")
-        
-        try:
-            # Инициализация парсера
-            parser = Parser()
-            
-            # Получение результатов поиска
-            logger.info("Получение результатов поиска...")
-            results = await parser.search(query, limit, pages, search_engine)
-            logger.info(f"Получено {len(results)} результатов")
-            
-            # Инициализация Playwright
-            logger.debug("Инициализация Playwright...")
-            async with async_playwright() as p:
-                # Запуск браузера
-                browser = await p.chromium.launch()
-                context = await browser.new_context()
-                page = await context.new_page()
-                
-                logger.debug("Получение HTML-контента для каждого результата...")
-                
-                # Получение HTML-контента для каждого результата
-                for i, result in enumerate(results, 1):
-                    try:
-                        url = result.get('url')
-                        if not url:
-                            logger.error(f"Пропуск результата {i}: отсутствует URL")
-                            continue
-                            
-                        logger.debug(f"\n--- Обработка результата {i}/{len(results)} ---")
-                        logger.debug(f"URL: {url}")
-                        
-                        try:
-                            # Загрузка страницы
-                            logger.debug(f"Загрузка страницы {url}...")
-                            await page.goto(url, wait_until="networkidle", timeout=30000)
-                            
-                            # Получение HTML
-                            html = await page.content()
-                            
-                            if html:
-                                logger.debug(f"HTML получен успешно")
-                                logger.debug(f"Размер HTML: {len(html)} байт")
-                                logger.debug(f"Первые 100 символов HTML: {html[:100]}")
-                                result['html_content'] = html
-                            else:
-                                logger.error(f"Получен пустой HTML для {url}")
-                                
-                        except Exception as e:
-                            logger.error(f"Ошибка при получении HTML для {url}: {e}")
-                            logger.error(traceback.format_exc())
-                            continue
-                            
-                    except Exception as e:
-                        logger.error(f"Ошибка при обработке результата {i}: {e}")
-                        logger.error(traceback.format_exc())
-                        continue
-                
-                # Закрытие браузера
-                await browser.close()
-                logger.debug("Браузер закрыт")
-            
-            # Обработка результатов
-            logger.info("Начало обработки результатов...")
-            await process_results(results, query)
-            logger.info("Обработка результатов завершена")
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Критическая ошибка при выполнении поиска: {e}")
-            logger.error(traceback.format_exc())
             raise 
